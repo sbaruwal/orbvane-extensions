@@ -1,0 +1,59 @@
+# Builds every new or changed extension in extensions.json from source (arm64 and x64), uploads
+# each as the release <id>-<version>, and commits the new index.json. Pull requests only build,
+# so reviewers see that the submission builds.
+name: Publish
+
+on:
+  push:
+    branches: [main]
+    paths: [extensions.json]
+  pull_request:
+    paths: [extensions.json]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Install cargo-orbvane
+        run: cargo install --locked --git https://github.com/sbaruwal/orbvane cargo-orbvane
+
+      - name: Build
+        run: >
+          cargo orbvane registry extensions.json
+          --previous index.json
+          --out dist
+          --download-base "https://github.com/${{ github.repository }}/releases/download"
+
+      - name: Upload releases
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for dir in dist/*/; do
+            tag=$(basename "$dir")
+            gh release view "$tag" >/dev/null 2>&1 && continue
+            gh release create "$tag" "$dir"* --title "$tag" --notes "Built from source by the registry's CI."
+          done
+
+      - name: Commit the index
+        if: github.event_name != 'pull_request'
+        run: |
+          cp dist/index.json index.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.json
+          git diff --cached --quiet || git commit -m "Update the index"
+          git push
